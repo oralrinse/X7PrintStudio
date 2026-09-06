@@ -85,6 +85,8 @@ def _draw_text(cv: ImageDraw.ImageDraw, it: TextItem, doc: Document):
 
 def _draw_image(cv: ImageDraw.ImageDraw, canvas: Image.Image, it: ImageItem):
     src = it.rendered()
+    if it.rot:                       # 顺时针 90/180/270
+        src = src.rotate(-it.rot, expand=True)
     sw, sh = src.size
     if sw <= 0 or sh <= 0:
         return
@@ -102,18 +104,30 @@ def _draw_image(cv: ImageDraw.ImageDraw, canvas: Image.Image, it: ImageItem):
     canvas.paste(small.convert("RGB"), (dx, dy))
 
 
-def rasterize(doc: Document) -> Image.Image:
-    """渲染成宽 WIDTH 的灰度 PIL 图(0=黑底可见? 输出 L, 白=255)。"""
+def draw_item(canvas: Image.Image, it, doc: Document):
+    """把单个图层画到既有 RGB 画布上(供拖拽时局部重画)。坏图层静默跳过。"""
+    cv = ImageDraw.Draw(canvas)
+    try:
+        if isinstance(it, ImageItem):
+            _draw_image(cv, canvas, it)
+        elif isinstance(it, TextItem):
+            _draw_text(cv, it, doc)
+    except Exception:
+        pass
+
+
+def rasterize_rgb(doc: Document, skip: int = -1) -> Image.Image:
+    """渲染成宽 WIDTH 的 RGB 画布; skip>=0 时跳过该图层(供拖拽背景缓存)。"""
     h = max(16, int(doc.height))
     bg = _WHITE if doc.bg == "w" else _BLACK
     canvas = Image.new("RGB", (WIDTH, h), bg)
-    cv = ImageDraw.Draw(canvas)
-    for it in doc.items:
-        try:
-            if isinstance(it, ImageItem):
-                _draw_image(cv, canvas, it)
-            elif isinstance(it, TextItem):
-                _draw_text(cv, it, doc)
-        except Exception:
-            continue  # 单个图层坏(如图片文件缺失)不拖垮整张
-    return canvas.convert("L")
+    for n, it in enumerate(doc.items):
+        if n == skip:
+            continue
+        draw_item(canvas, it, doc)
+    return canvas
+
+
+def rasterize(doc: Document, skip: int = -1) -> Image.Image:
+    """渲染成宽 WIDTH 的灰度 PIL 图(白=255)。skip>=0 时跳过该图层。"""
+    return rasterize_rgb(doc, skip).convert("L")

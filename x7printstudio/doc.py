@@ -16,6 +16,7 @@ class ImageItem:
     w: int = 1248          # 目标显示宽(px)
     h: int = 1248          # 目标显示高(px)
     keep_aspect: bool = True
+    rot: int = 0           # 顺时针旋转角度: 0/90/180/270
     mode: str = "gray"     # gray | bw | invert
     threshold: int = 128
     _cache: dict = field(default_factory=dict, repr=False, compare=False)

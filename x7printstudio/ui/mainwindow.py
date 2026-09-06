@@ -21,7 +21,7 @@ from PIL import Image
 
 from ..spec import WIDTH, ROWW, DPI, PAPER_MM, DEFAULT_CANVAS_H
 from .. import raster as R
-from ..compose import rasterize, measure_text, resolve_maxw
+from ..compose import rasterize, rasterize_rgb, draw_item, measure_text, resolve_maxw
 from ..doc import Document, TextItem, ImageItem
 from .layers import LayersPanel
 from .textdlg import TextDialog
@@ -64,6 +64,7 @@ class Canvas(QWidget):
         self._mode = None          # None | move | resize
         self._grab = (0, 0)        # move: 指针相对item左上; resize: 角号0..3
         self._orig = None
+        self.smooth_scale = True      # 拖拽期间用快速缩放降抖动, 停手恢复平滑
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -87,9 +88,10 @@ class Canvas(QWidget):
         need = (int(WIDTH * self.zoom), int(self.mw.doc.height * self.zoom))
         if self._pix_need == need and not self._pix.isNull():
             return
+        mode = (Qt.TransformationMode.FastTransformation if not self.smooth_scale
+                else Qt.TransformationMode.SmoothTransformation)
         self._pix = QPixmap.fromImage(img).scaled(
-            need[0], need[1], Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
+            need[0], need[1], Qt.AspectRatioMode.IgnoreAspectRatio, mode)
         self._pix_need = need
 
     def paintEvent(self, _e):
@@ -112,10 +114,14 @@ class Canvas(QWidget):
                 p.drawRect(round(ox + x * z), round(oy + y * z),
                            max(1, round(w * z)), max(1, round(h * z)))
                 if isinstance(self.mw.doc.items[sel], ImageItem):   # 图: 角点可拉
-                    hs = max(4, round(4 * z))
+                    hs = max(3, round(3.2 * z))      # 约 6px 屏幕大小
                     for hx, hy in ((x, y), (x + w, y), (x, y + h), (x + w, y + h)):
                         p.fillRect(round(ox + hx * z) - hs, round(oy + hy * z) - hs,
                                    hs * 2, hs * 2, _SEL)
+                    p.setPen(QPen(QColor(255, 255, 255, 220), 1))
+                    for hx, hy in ((x, y), (x + w, y), (x, y + h), (x + w, y + h)):
+                        p.drawRect(round(ox + hx * z) - hs, round(oy + hy * z) - hs,
+                                   hs * 2, hs * 2)
         p.end()
 
     # ---- 坐标换算与命中 ----
@@ -131,7 +137,9 @@ class Canvas(QWidget):
                 return i
         return -1
 
-    def _corner(self, i, x, y, tol=14) -> int:
+    def _corner(self, i, x, y) -> int:
+        """命中缩放角(0..3); 容差按屏幕像素, 缩放小时也易点中。"""
+        tol = max(6.0, 12.0 / self.zoom)
         bx, by, bw, bh = self.mw.item_bbox(i)
         pts = ((bx, by), (bx + bw, by), (bx, by + bh), (bx + bw, by + bh))
         for k, (cx, cy) in enumerate(pts):
@@ -153,12 +161,15 @@ class Canvas(QWidget):
             it = mw.doc.items[i]
             self._orig = (it.x, it.y, it.w if isinstance(it, ImageItem) else 0,
                           it.h if isinstance(it, ImageItem) else 0)
-            if isinstance(it, ImageItem) and self._corner(i, x, y) >= 0:
+            cc = self._corner(i, x, y)
+            if isinstance(it, ImageItem) and cc >= 0:
                 self._mode = "resize"
-                self._grab = self._corner(i, x, y)
+                self._grab = cc
             else:
                 self._mode = "move"
                 self._grab = (x - it.x, y - it.y)
+            if self._mode:
+                mw.begin_drag(i)          # 缓存"除本层外"背景, 拖拽时只重画本层
         mw.select_index(i)
         mw.reload_panels()
 
@@ -195,18 +206,30 @@ class Canvas(QWidget):
         ox, oy, ow, oh = self._orig
         if ow <= 0 or oh <= 0:
             return
-        # 与所抓角相对的对角固定为锚
-        ax = ox + ow if c in (0, 1) else ox
-        ay = oy + oh if c in (0, 2) else oy
+        # 所抓角的对角为固定锚: 角0左上 -> 锚右下; 角1右上 -> 锚左下; 依此类推。
+        # pts 顺序: 0=左上 1=右上 2=左下 3=右下
+        ax = ox + ow if c in (0, 2) else ox          # 锚在右(0,2) / 锚在左(1,3)
+        ay = oy + oh if c in (0, 1) else oy          # 锚在下(0,1) / 锚在上(2,3)
+        # 指针不越过锚点, 免得翻转
+        if c in (0, 2):
+            x = min(x, ax)
+        else:
+            x = max(x, ax)
+        if c in (0, 1):
+            y = min(y, ay)
+        else:
+            y = max(y, ay)
         if it.keep_aspect:
-            k = max(0.0, (x - ax) / ow)
+            rx = abs(x - ax) / ow                     # 主轴 = 拖动多的一向
+            ry = abs(y - ay) / oh
+            k = rx if rx >= ry else ry
             w2 = max(8, round(ow * k))
             h2 = max(8, round(oh * k))
         else:
             w2 = max(8, round(abs(x - ax)))
             h2 = max(8, round(abs(y - ay)))
-        nx = ax - w2 if c in (0, 1) else ax
-        ny = ay - h2 if c in (0, 2) else ay
+        nx = ax - w2 if c in (0, 2) else ax
+        ny = ay - h2 if c in (0, 1) else ay
         it.x, it.y, it.w, it.h = nx, ny, w2, h2
 
     def keyPressEvent(self, ev):
@@ -239,6 +262,9 @@ class MainWindow(QMainWindow):
         self.path = ""
         self.sel = -1
         self._gray_img = None
+        self._drag_bg = None     # 拖拽时"除当前层外"的 RGB 背景缓存
+        self._drag_idx = None
+        self._drag_h = 0
         self._dither_on = False
         self._dither_img = None
         self._building = False
@@ -551,15 +577,40 @@ class MainWindow(QMainWindow):
         if not self._fast.isActive():
             self._fast.start()
 
+    def begin_drag(self, i):
+        """按下即缓存"除第 i 层外"背景; 拖拽每帧只把第 i 层叠上去, 更跟手。"""
+        self._drag_idx = i
+        self._drag_h = self.doc.height
+        try:
+            self._drag_bg = rasterize_rgb(self.doc, skip=i)
+        except Exception:
+            self._drag_bg = None
+
     def finish_drag(self):
+        self._drag_bg = None
+        self._drag_idx = None
+        self.canvas.smooth_scale = True
         if self._fast.isActive():
             self._fast.stop()
         self.refresh_soon()
 
     def _do_fast(self):
         self._grow_if_needed()
-        self._render_gray()
+        overlay = False
+        if self._drag_bg is not None and self._drag_idx is not None \
+                and 0 <= self._drag_idx < len(self.doc.items):
+            if self._drag_h != self.doc.height:      # 画布被加长 -> 重建背景
+                self._drag_bg = rasterize_rgb(self.doc, skip=self._drag_idx)
+                self._drag_h = self.doc.height
+            if self._drag_bg is not None:
+                base = self._drag_bg.copy()
+                draw_item(base, self.doc.items[self._drag_idx], self.doc)
+                self._gray_img = pil_l_to_qimage(base.convert("L"))
+                overlay = True
+        if not overlay:
+            self._render_gray()
         self._dither_img = None
+        self.canvas.smooth_scale = not overlay   # 移动中用快速缩放, 画面更顺
         self.canvas.rebuild()
         self.canvas.update()
 
@@ -569,10 +620,22 @@ class MainWindow(QMainWindow):
         self._dither_img = None
         if self._dither_on:
             self._dith_t.start()
+        self.canvas.smooth_scale = True
         self.canvas.rebuild()
         self.canvas.update()
         self.statusBar().showMessage(
             f"图层 {len(self.doc.items)} · 内容至底 {bottom}px · 纸高 {self.doc.height}px · 显示 {self.canvas.zoom * 100:.0f}%")
+
+    def rotate_image(self, it: ImageItem):
+        """顺时针旋转 90°(模型换向 + 角度累加), 几何中心不变。"""
+        cx, cy = it.x + it.w / 2, it.y + it.h / 2
+        it.rot = (it.rot + 90) % 360
+        it.w, it.h = it.h, it.w
+        it.x = int(round(cx - it.w / 2))
+        it.y = int(round(cy - it.h / 2))
+        self._dither_img = None
+        self._sync_all()
+        self.refresh_soon()
 
     def _grow_if_needed(self) -> int:
         """内容超出画布底时自动加长纸高; 返回内容最底 y。"""
@@ -665,6 +728,9 @@ class MainWindow(QMainWindow):
             b = QPushButton("更换图片…")
             b.clicked.connect(lambda: self._repick_image(it))
             self.item_form.addRow("", b)
+            rb = QPushButton("顺时针旋转 90°")
+            rb.clicked.connect(lambda: self.rotate_image(it))
+            self.item_form.addRow("", rb)
         else:
             self.item_form.addRow("X", spin(it.x, -4000, 8000, lambda v, it=it: setattr(it, "x", v)))
             self.item_form.addRow("Y", spin(it.y, -4000, 60000, lambda v, it=it: setattr(it, "y", v)))
