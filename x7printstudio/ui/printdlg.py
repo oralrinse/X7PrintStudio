@@ -125,9 +125,13 @@ class PrintDialog(QDialog):
     def _conn_text(q):
         """生成“连接情况”文案。返回 (文本, 是否就绪)。"""
         if q is None:
-            return ("尚未发现任何打印队列。\n"
-                    "请确认已用 USB 线连接 X7 且电源开启 —— Windows 会自动创建打印队列;\n"
-                    "在此之前只能先“仅导出 .bin”。", False)
+            return ("Windows 中尚未添加 X7 打印队列。\n"
+                    "接好 USB 并开机后, 若系统没有自动出现, 请手动添加一次:\n"
+                    "设置 → 打印机和扫描仪 → 添加设备 → 我需要的打印机不在列表中\n"
+                    "→ 手动添加本地打印机 → 使用现有端口: 选以 USB 开头、\n"
+                    "  括号内含 X7 设备名的端口(如 USB001, 不要选 LPT)\n"
+                    "→ 厂商 Generic / 型号 Generic / Text Only → 完成\n"
+                    "然后在右侧点“刷新队列”。在此之前可先“仅导出 .bin”。", False)
         is_usb = printer.is_usb_port(q["port"])
         is_x7 = printer.is_x7_queue(q)
         st = printer.queue_status(q["name"])
