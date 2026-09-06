@@ -3,7 +3,7 @@
 from __future__ import annotations
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout,
                                QLabel, QComboBox, QSpinBox, QCheckBox, QFileDialog,
-                               QMessageBox, QPushButton, QHBoxLayout)
+                               QMessageBox, QPushButton, QHBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 
 from .. import lzojob
@@ -32,15 +32,19 @@ class PrintDialog(QDialog):
         form = QFormLayout()
 
         self.queue = QComboBox()
-        self.queues = printer.list_queues()
-        if self.queues:
-            for i, q in enumerate(self.queues):
-                tag = "USB" if ("usb" in q["port"].lower() or q["port"].isdigit()) else "网/其他"
-                self.queue.addItem(f"{q['name']}  [{tag} {q['port']}]", q["name"])
-            fav = printer.find_usb_queue()
-            if fav:
-                self.queue.setCurrentIndex(max(0, self.queue.findData(fav["name"])))
-        form.addRow("打印队列", self.queue)
+        qrow = QWidget()
+        qh = QHBoxLayout(qrow)
+        qh.setContentsMargins(0, 0, 0, 0)
+        qh.addWidget(self.queue, 1)
+        btn_refresh = QPushButton("刷新队列")
+        btn_refresh.clicked.connect(self._reload_queues)
+        qh.addWidget(btn_refresh)
+        form.addRow("打印队列", qrow)
+
+        self.conn = QLabel("…")
+        self.conn.setWordWrap(True)
+        form.addRow("连接情况", self.conn)
+        self.queue.currentIndexChanged.connect(self._update_conn)
 
         self.copies = QSpinBox()
         self.copies.setRange(1, 99)
@@ -71,9 +75,84 @@ class PrintDialog(QDialog):
         btns.addWidget(self.btn_cancel)
         lay.addLayout(btns)
 
+        self._fill_queues(select_fav=True)
+
         if not self.queues:
             self.btn_go.setEnabled(False)
             self.est.setText(self.est.text() + "\n未发现本地打印队列 → 请只导出 .bin")
+
+    def _fill_queues(self, select_fav: bool):
+        """重扫本地队列填入下拉; 尽量选中最可能的 X7 队列。"""
+        self.queues = printer.list_queues()
+        self.queue.blockSignals(True)
+        self.queue.clear()
+        for q in self.queues:
+            tag = "USB" if printer.is_usb_port(q["port"]) else "网/其他"
+            self.queue.addItem(f"{q['name']}  [{tag} {q['port']}]", q["name"])
+        self.queue.blockSignals(False)
+        if select_fav and self.queues:
+            fav = printer.find_usb_queue()
+            if fav:
+                self.queue.setCurrentIndex(max(0, self.queue.findData(fav["name"])))
+        self.btn_go.setEnabled(bool(self.queues))
+        self._update_conn()
+
+    def _reload_queues(self):
+        """用户点“刷新队列”: 保留原选择, 若队列消失则自动选最优。"""
+        prev = self.queue.currentData()
+        self._fill_queues(select_fav=False)
+        if not self.queues:
+            return
+        idx = self.queue.findData(prev) if prev else -1
+        if idx < 0:
+            fav = printer.find_usb_queue()
+            idx = self.queue.findData(fav["name"]) if fav else 0
+        if idx >= 0:
+            self.queue.setCurrentIndex(idx)
+        self._update_conn()
+
+    def _update_conn(self):
+        q = None
+        name = self.queue.currentData()
+        if name:
+            q = next((x for x in self.queues if x["name"] == name), None)
+        txt, ok = self._conn_text(q)
+        color = "#1b7f3b" if ok else ("#b02010" if q else "#8a6d00")
+        self.conn.setText(txt)
+        self.conn.setStyleSheet(f"color:{color};")
+
+    @staticmethod
+    def _conn_text(q):
+        """生成“连接情况”文案。返回 (文本, 是否就绪)。"""
+        if q is None:
+            return ("尚未发现任何打印队列。\n"
+                    "请确认已用 USB 线连接 X7 且电源开启 —— Windows 会自动创建打印队列;\n"
+                    "在此之前只能先“仅导出 .bin”。", False)
+        is_usb = printer.is_usb_port(q["port"])
+        is_x7 = printer.is_x7_queue(q)
+        st = printer.queue_status(q["name"])
+        if is_x7:
+            head = "✓ 已识别得力 X7(USB)"
+        elif is_usb:
+            head = "USB 队列(名称未见 X7/得力, 型号待确认)"
+        else:
+            head = "非 USB 通道"
+        lines = [head]
+        if st["error"]:
+            lines.append("✗ 无法读取该队列状态(可能已被移除)。")
+            return "\n".join(lines), False
+        if st["online"]:
+            lines.append(f"✓ 在线 · 端口 {q['port']} · 可发送 RAW 作业")
+            return "\n".join(lines), True
+        reasons = list(st["flags"])
+        if st["work_offline"]:
+            reasons.append("脱机工作(作业被挂起)")
+        lines.append("✗ 未在线: " + ("、".join(reasons) if reasons else "状态未知"))
+        if is_usb:
+            lines.append("  请检查 USB 线 / 打印机电源; 接好后再点“刷新队列”。")
+        else:
+            lines.append("  提示: 应选择端口为 USB、名称带 X7/得力 的队列。")
+        return "\n".join(lines), False
 
     def set_est(self, rows, len_mm, ink, joblen):
         self.est.setText(
