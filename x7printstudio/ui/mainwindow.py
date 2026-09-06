@@ -31,6 +31,7 @@ from .imagedlg import pick_image
 _MARGIN = 40
 _BG_OUT = QColor(0xEC, 0xEC, 0xEC)
 _SEL = QColor(0x1B, 0x9E, 0xFF)
+_HOVER = QColor(0xFF, 0xC4, 0x00)   # 悬停在可拉角上时的高亮
 
 
 def pil_l_to_qimage(im: Image.Image) -> QImage:
@@ -65,7 +66,8 @@ class Canvas(QWidget):
         self._mode = None          # None | move | resize
         self._grab = (0, 0)        # move: 指针相对item左上; resize: 角号0..3
         self._orig = None
-        self.smooth_scale = True      # 拖拽期间用快速缩放降抖动, 停手恢复平滑
+        self._hover = -1             # 悬停所在的可拉角(0..3), -1=无
+        self.smooth_scale = True     # 拖拽期间用快速缩放降抖动, 停手恢复平滑
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -116,11 +118,13 @@ class Canvas(QWidget):
                            max(1, round(w * z)), max(1, round(h * z)))
                 if isinstance(self.mw.doc.items[sel], ImageItem):   # 图: 角点可拉
                     hs = max(3, round(3.2 * z))      # 约 6px 屏幕大小
-                    for hx, hy in ((x, y), (x + w, y), (x, y + h), (x + w, y + h)):
+                    pts = ((x, y), (x + w, y), (x, y + h), (x + w, y + h))
+                    for k, (hx, hy) in enumerate(pts):
                         p.fillRect(round(ox + hx * z) - hs, round(oy + hy * z) - hs,
-                                   hs * 2, hs * 2, _SEL)
+                                   hs * 2, hs * 2,
+                                   _HOVER if k == self._hover else _SEL)
                     p.setPen(QPen(QColor(255, 255, 255, 220), 1))
-                    for hx, hy in ((x, y), (x + w, y), (x, y + h), (x + w, y + h)):
+                    for hx, hy in pts:
                         p.drawRect(round(ox + hx * z) - hs, round(oy + hy * z) - hs,
                                    hs * 2, hs * 2)
         p.end()
@@ -148,6 +152,22 @@ class Canvas(QWidget):
                 return k
         return -1
 
+    def _hover_info(self, x, y) -> tuple:
+        """非拖拽时: 返回 (命中的可拉角 or -1, 应显示光标)。"""
+        mw = self.mw
+        h = self._hit(x, y)
+        hv = -1
+        cur = (Qt.CursorShape.SizeAllCursor if h >= 0
+               else Qt.CursorShape.ArrowCursor)
+        sel = mw.sel
+        if 0 <= sel < len(mw.doc.items) and isinstance(mw.doc.items[sel], ImageItem):
+            cc = self._corner(sel, x, y)
+            if cc >= 0:
+                hv = cc
+                cur = (Qt.CursorShape.SizeFDiagCursor if cc in (0, 3)  # 左上/右下
+                       else Qt.CursorShape.SizeBDiagCursor)            # 右上/左下
+        return hv, cur
+
     # ---- 交互 ----
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
@@ -155,7 +175,24 @@ class Canvas(QWidget):
         self.setFocus()
         x, y = self._doc_pt(ev)
         mw = self.mw
-        i = self._hit(x, y)
+        # 已选中图片的可拉角(黄区): 容差可能略微出框, 此时按下按“拉角”处理,
+        # 不要因 _hit 落在空白而清掉选中、导致拖动失效。
+        si = mw.sel
+        top = self._hit(x, y)
+        if (0 <= si < len(mw.doc.items) and isinstance(mw.doc.items[si], ImageItem)
+                and top in (si, -1)):
+            cc = self._corner(si, x, y)
+            if cc >= 0:
+                it = mw.doc.items[si]
+                self._orig = (it.x, it.y, it.w, it.h)
+                self._mode = "resize"
+                self._grab = cc
+                self._hover = cc
+                mw.begin_drag(si)
+                mw.select_index(si)
+                mw.reload_panels()
+                return
+        i = top
         self._mode = None
         self._orig = None
         if i >= 0:
@@ -171,6 +208,7 @@ class Canvas(QWidget):
                 self._grab = (x - it.x, y - it.y)
             if self._mode:
                 mw.begin_drag(i)          # 缓存"除本层外"背景, 拖拽时只重画本层
+                self._hover = self._grab if self._mode == "resize" else -1
         mw.select_index(i)
         mw.reload_panels()
 
@@ -186,10 +224,11 @@ class Canvas(QWidget):
                 self._resize_image(it, x, y)
             mw.refresh_fast()
         else:
-            h = self._hit(x, y)
-            self.setCursor(Qt.CursorShape.SizeAllCursor if h >= 0
-                           else Qt.CursorShape.ArrowCursor)
-            self.update()
+            hv, cur = self._hover_info(x, y)
+            if hv != self._hover:
+                self._hover = hv
+                self.update()          # 进/出可拉角时刷新把手高亮
+            self.setCursor(cur)
 
     def mouseReleaseEvent(self, ev):
         if self._mode:
@@ -197,9 +236,9 @@ class Canvas(QWidget):
             self._orig = None
             self.mw.finish_drag()
         x, y = self._doc_pt(ev)
-        h = self._hit(x, y)
-        self.setCursor(Qt.CursorShape.SizeAllCursor if h >= 0
-                       else Qt.CursorShape.ArrowCursor)
+        hv, cur = self._hover_info(x, y)
+        self._hover = hv
+        self.setCursor(cur)
         self.update()
 
     def _resize_image(self, it: ImageItem, x: float, y: float):
