@@ -15,8 +15,8 @@ from PySide6.QtGui import (QAction, QColor, QImage, QPainter, QPen, QPixmap,
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QScrollArea, QFormLayout, QLabel, QComboBox,
                                QSpinBox, QCheckBox, QSlider, QPushButton,
-                               QFileDialog, QMessageBox, QDockWidget, QGroupBox,
-                               QToolBar)
+                               QFileDialog, QInputDialog, QMessageBox, QDockWidget,
+                               QGroupBox, QToolBar)
 
 from PIL import Image
 
@@ -319,7 +319,8 @@ class MainWindow(QMainWindow):
         act("打开…", self.open_doc, "打开 .x7proj 工程", "Ctrl+O")
         act("保存", self.save_doc, "保存工程", "Ctrl+S")
         tb.addSeparator()
-        act("＋图片", self.add_image, "插入图片")
+        act("＋图片", self.add_image, "插入单张图片")
+        act("批量图片…", self.import_batch, "一次选多张图片, 网格排版导入")
         act("＋文字", self.add_text, "插入文字")
         act("粘贴", self.paste_clipboard, "从剪贴板粘贴图片或文字", "Ctrl+V")
         tb.addSeparator()
@@ -516,6 +517,55 @@ class MainWindow(QMainWindow):
         self.sel = len(self.doc.items) - 1
         self._sync_all()
         self.refresh_soon()
+
+    # ---------- 批量导入 ----------
+    def import_batch(self):
+        """一次选多张图, 网格排版导入(每张保持比例、在格内居中)。"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "批量导入图片", self.last_dir,
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;所有文件 (*)")
+        if not files:
+            return
+        cols, ok = QInputDialog.getInt(self, "批量排版", "每行排几张图:", 3, 1, 6)
+        if not ok:
+            return
+        self.last_dir = os.path.dirname(files[0])
+        usable = WIDTH - 80
+        gap = 24
+        cell = max(80, int((usable - gap * (cols - 1)) / cols))
+        x0 = 40
+        y = self._next_y()
+        row_y = y
+        added, skipped = 0, 0
+        for path in files:
+            try:
+                with Image.open(path) as im:
+                    sw, sh = im.size
+            except Exception:
+                skipped += 1
+                continue
+            if not sw or not sh:
+                sw, sh = WIDTH, cell
+            k = min(cell / sw, cell / sh)          # 缩放至能放进方格
+            iw, ih = max(8, int(sw * k)), max(8, int(sh * k))
+            s = added                              # 成功序(失败不占格)
+            col = s % cols
+            if col == 0 and s:
+                row_y += cell + gap                # 满行换行
+            ix = x0 + col * (cell + gap) + (cell - iw) // 2
+            iy = row_y + (cell - ih) // 2
+            it = ImageItem(path=path, x=ix, y=iy, w=iw, h=ih, keep_aspect=True,
+                           mode="gray", threshold=128)
+            self.doc.items.append(it)
+            added += 1
+        if not added:
+            self.statusBar().showMessage("所选图片均无法读取", 2500)
+            return
+        self.sel = len(self.doc.items) - 1
+        self._sync_all()
+        self.refresh_soon()
+        self.statusBar().showMessage(
+            f"已导入 {added} 张图片" + (f", {skipped} 张失败" if skipped else ""), 3000)
 
     # ---------- 剪贴板粘贴 ----------
     def _next_y(self, top=40) -> int:
