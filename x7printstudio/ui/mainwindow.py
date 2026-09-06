@@ -7,11 +7,12 @@
 """
 from __future__ import annotations
 import os
+import time
 
 from PySide6.QtCore import Qt, QTimer, QPointF, QEvent
 from PySide6.QtGui import (QAction, QColor, QImage, QPainter, QPen, QPixmap,
                            QBrush, QFont)
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QScrollArea, QFormLayout, QLabel, QComboBox,
                                QSpinBox, QCheckBox, QSlider, QPushButton,
                                QFileDialog, QMessageBox, QDockWidget, QGroupBox,
@@ -320,6 +321,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         act("＋图片", self.add_image, "插入图片")
         act("＋文字", self.add_text, "插入文字")
+        act("粘贴", self.paste_clipboard, "从剪贴板粘贴图片或文字", "Ctrl+V")
         tb.addSeparator()
         act("－", lambda: self._zoom_man(self.canvas.zoom / 1.25), "缩小(取消宽度自动适配)")
         act("＋", lambda: self._zoom_man(self.canvas.zoom * 1.25), "放大(取消宽度自动适配)")
@@ -514,6 +516,68 @@ class MainWindow(QMainWindow):
         self.sel = len(self.doc.items) - 1
         self._sync_all()
         self.refresh_soon()
+
+    # ---------- 剪贴板粘贴 ----------
+    def _next_y(self, top=40) -> int:
+        y = top
+        for o in self.doc.items:
+            _x, _y, _w, h = self.item_bbox_of(o)
+            y = max(y, _y + h + 40)
+        return y
+
+    def _clip_dir(self) -> str:
+        """剪贴板图片落盘目录(用户数据区, 不随系统清理消失)。"""
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "X7PrintStudio", "clipboard")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def paste_clipboard(self):
+        """粘贴剪贴板: 有图片贴图, 否则有文字贴文字。"""
+        if QApplication.activeModalWidget() is not None:
+            return                          # 编辑弹窗里 Ctrl+V 是弹窗自己的
+        mime = QApplication.clipboard().mimeData()
+        if mime.hasImage():
+            self._paste_clip_image()
+        else:
+            txt = (mime.text() or "").strip()
+            if txt:
+                self._paste_clip_text(txt)
+            else:
+                self.statusBar().showMessage("剪贴板为空: 没有图片也没有文字", 2500)
+
+    def _paste_clip_image(self) -> bool:
+        img = QApplication.clipboard().image()
+        if img.isNull():
+            return False
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+        path = os.path.join(self._clip_dir(), f"clip_{int(time.time() * 1000)}.png")
+        if not img.save(path, "PNG"):
+            return False
+        w = WIDTH - 80                       # 等比满宽, 同选图插入
+        try:
+            with Image.open(path) as im:
+                sw, sh = im.size
+            h = max(40, int(w * sh / sw)) if (sw and sh) else 1248
+        except Exception:
+            h = 1248
+        it = ImageItem(path=path, x=40, y=self._next_y(), w=w, h=h,
+                       keep_aspect=True, mode="gray", threshold=128)
+        self.doc.items.append(it)
+        self.sel = len(self.doc.items) - 1
+        self._sync_all()
+        self.refresh_soon()
+        self.statusBar().showMessage("已粘贴剪贴板图片", 2000)
+        return True
+
+    def _paste_clip_text(self, txt: str):
+        it = TextItem(text=txt, x=60, y=self._next_y(), maxw=WIDTH - 120,
+                      size=44, align="left")
+        self.doc.items.append(it)
+        self.sel = len(self.doc.items) - 1
+        self._sync_all()
+        self.refresh_soon()
+        self.statusBar().showMessage("已粘贴剪贴板文字", 2000)
 
     def _repick_image(self, it: ImageItem):
         p, _ = QFileDialog.getOpenFileName(self, "更换图片", it.path,
