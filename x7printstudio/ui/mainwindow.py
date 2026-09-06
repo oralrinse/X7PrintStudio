@@ -8,7 +8,7 @@
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QTimer, QPointF
+from PySide6.QtCore import Qt, QTimer, QPointF, QEvent
 from PySide6.QtGui import (QAction, QColor, QImage, QPainter, QPen, QPixmap,
                            QBrush, QFont)
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
@@ -172,7 +172,7 @@ class Canvas(QWidget):
                 it.y = round(y - self._grab[1])
             else:
                 self._resize_image(it, x, y)
-            mw.refresh_soon()
+            mw.refresh_fast()
         else:
             h = self._hit(x, y)
             self.setCursor(Qt.CursorShape.SizeAllCursor if h >= 0
@@ -180,7 +180,15 @@ class Canvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, ev):
-        self._mode = None
+        if self._mode:
+            self._mode = None
+            self._orig = None
+            self.mw.finish_drag()
+        x, y = self._doc_pt(ev)
+        h = self._hit(x, y)
+        self.setCursor(Qt.CursorShape.SizeAllCursor if h >= 0
+                       else Qt.CursorShape.ArrowCursor)
+        self.update()
 
     def _resize_image(self, it: ImageItem, x: float, y: float):
         c = self._grab
@@ -240,6 +248,10 @@ class MainWindow(QMainWindow):
         sc = QScrollArea()
         sc.setWidget(self.canvas)
         sc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sc.viewport().installEventFilter(self)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sc = sc
+        self._fit = True          # 编辑区宽度自动适配可视区(无横向滚动条)
         self.setCentralWidget(sc)
 
         self._build_toolbar()
@@ -248,6 +260,10 @@ class MainWindow(QMainWindow):
         self._timer.setSingleShot(True)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._do_refresh)
+        self._fast = QTimer(self)          # 拖拽期间的快速刷新节拍
+        self._fast.setSingleShot(True)
+        self._fast.setInterval(10)
+        self._fast.timeout.connect(self._do_fast)
         self._dith_t = QTimer(self)
         self._dith_t.setSingleShot(True)
         self._dith_t.setInterval(350)
@@ -279,9 +295,9 @@ class MainWindow(QMainWindow):
         act("＋图片", self.add_image, "插入图片")
         act("＋文字", self.add_text, "插入文字")
         tb.addSeparator()
-        act("－", lambda: self.canvas.set_zoom(self.canvas.zoom / 1.25), "缩小")
-        act("＋", lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25), "放大")
-        act("适合宽", self.fit_width, "整幅显示")
+        act("－", lambda: self._zoom_man(self.canvas.zoom / 1.25), "缩小(取消宽度自动适配)")
+        act("＋", lambda: self._zoom_man(self.canvas.zoom * 1.25), "放大(取消宽度自动适配)")
+        act("适合宽", self.fit_width, "重新开启宽度自动适配")
         self.act_dith = act("1bpp效果", self.toggle_dither, "预览抖动打印效果", check=True)
         tb.addSeparator()
         act("导出PNG…", self.export_png)
@@ -289,8 +305,35 @@ class MainWindow(QMainWindow):
         act("打印/导出作业…", self.open_print, "打印或导出 .bin", "Ctrl+P")
 
     def fit_width(self):
-        w = max(200, self.centralWidget().width() - _MARGIN * 2 - 40)
-        self.canvas.set_zoom(w / WIDTH)
+        """工具"适合宽": 重新开启宽度自动适配。"""
+        self._fit = True
+        self.sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._fit_view()
+
+    def _zoom_man(self, z):
+        """手动缩放: 取消宽度自动适配, 允许横向平移查看放大细节。"""
+        self._fit = False
+        self.sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.canvas.set_zoom(z)
+
+    def _fit_view(self):
+        """把纸宽(1248px)缩放到恰好在可视区内; 只留左衬边距, 无横向滚动条。"""
+        vw = self.sc.viewport().width()
+        if vw <= 0:
+            return
+        avail = max(160, vw - _MARGIN - 16)
+        self.canvas.zoom = max(0.05, min(3.0, avail / WIDTH))
+        self.canvas.rebuild()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self._fit:
+            QTimer.singleShot(0, self._fit_view)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.sc.viewport() and ev.type() == QEvent.Type.Resize and self._fit:
+            QTimer.singleShot(0, self._fit_view)
+        return super().eventFilter(obj, ev)
 
     # ---------- 停靠面板 ----------
     def _build_docks(self):
@@ -503,14 +546,25 @@ class MainWindow(QMainWindow):
     def refresh_soon(self):
         self._timer.start()
 
+    def refresh_fast(self):
+        """拖拽期间的即时刷新: 合并到 ~10ms 节拍, 不重算 1bpp 抖动。"""
+        if not self._fast.isActive():
+            self._fast.start()
+
+    def finish_drag(self):
+        if self._fast.isActive():
+            self._fast.stop()
+        self.refresh_soon()
+
+    def _do_fast(self):
+        self._grow_if_needed()
+        self._render_gray()
+        self._dither_img = None
+        self.canvas.rebuild()
+        self.canvas.update()
+
     def _do_refresh(self):
-        bottom = 0
-        for it in self.doc.items:
-            _x, _y, _w, h = self.item_bbox_of(it)
-            bottom = max(bottom, _y + h)
-        if bottom > self.doc.height - 20:
-            self.doc.height = max(self.doc.height, bottom + 60)
-            self._upd_mm()
+        bottom = self._grow_if_needed()
         self._render_gray()
         self._dither_img = None
         if self._dither_on:
@@ -518,7 +572,18 @@ class MainWindow(QMainWindow):
         self.canvas.rebuild()
         self.canvas.update()
         self.statusBar().showMessage(
-            f"图层 {len(self.doc.items)} · 内容至底 {bottom}px · 纸高 {self.doc.height}px")
+            f"图层 {len(self.doc.items)} · 内容至底 {bottom}px · 纸高 {self.doc.height}px · 显示 {self.canvas.zoom * 100:.0f}%")
+
+    def _grow_if_needed(self) -> int:
+        """内容超出画布底时自动加长纸高; 返回内容最底 y。"""
+        bottom = 0
+        for it in self.doc.items:
+            _x, _y, _w, h = self.item_bbox_of(it)
+            bottom = max(bottom, _y + h)
+        if bottom > self.doc.height - 20:
+            self.doc.height = max(self.doc.height, bottom + 60)
+            self._upd_mm()
+        return bottom
 
     # ---------- 面板同步 ----------
     def reload_layers(self):
