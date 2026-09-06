@@ -9,31 +9,49 @@
 - 打印预估(纸长 mm + 墨量%)、份数、打印队列选择;**也可仅导出作业 `.bin`**(供其它通道如蓝牙桥再发)。
 - 工程保存/打开(`.x7proj`)、导出灰度 PNG。
 
+## 启动方法
+
+**方式 A:源码运行(需要 Python 3.11)**
+
+在项目根目录执行:
+
+```bat
+python -m pip install -r requirements.txt   :: 首次安装依赖
+python main.py                              :: 启动(或直接双击 run.bat)
+```
+
+**方式 B:打包版单文件 exe(免 Python)**
+
+`dist\X7PrintStudio.exe` 不随仓库分发,先在本机打包一次(脚本自动装依赖 + PyInstaller):
+
+```bat
+build_exe.bat   :: 产物: dist\X7PrintStudio.exe
+```
+
+打包后双击 `dist\X7PrintStudio.exe` 即可启动。
+
+> 两种方式的共同前提:**用 USB 线把 X7 接到电脑**,Windows 会自动建好打印队列「得力X7相印宝」(端口 USB00x)。若未接打印机,程序仍可启动用于排版与导出 .bin。
+
 ## 用法
 
-1. 用 USB 线把 X7 接到电脑(系统自动建好打印队列,端口 USB00x)。
-2. 双击运行 `dist\X7PrintStudio.exe`(打包版,免 Python);开发运行见下。
-3. `＋图片` 插照片、`＋文字` 写字,拖动/缩放排版;右侧属性面板微调字号/处理模式。
-4. 点 **打印/导出作业…** → 预览纸长与墨量 → 打印(或导出 .bin)。
-5. 首次打印建议先在设置里选好 **1bpp效果** 预览,确认排版密度合适再出纸。
+1. 按上节「启动方法」启动程序,进入编辑窗口。
+2. `＋图片` 插照片、`＋文字` 写字,拖动/缩放排版;右侧属性面板微调字号/处理模式。
+3. 点 **打印/导出作业…** → 预览纸长与墨量 → 打印(或导出 .bin)。
+4. 首次打印建议先在设置里选好 **1bpp效果** 预览,确认排版密度合适再出纸。
 
 > 连续纸打印:画布高度即"纸长",内容到底会自动加长画布,整段一次性出纸。
 
-## 开发运行 / 打包
+## 打包与自检
 
 ```bat
-:: 依赖
-python -m pip install -r requirements.txt
-
-:: 开发启动
-run.bat                (或 python main.py)
-
-:: 离线自检(无需打印机)
+:: 离线自检(无需打印机:验证 LZO 定长解/作业头/拼版链路,期望 ALL GREEN)
 python -m x7printstudio.selftest
 
-:: 打包单文件 exe(产物 dist\X7PrintStudio.exe)
+:: 打包单文件 exe(自动装依赖,产物 dist\X7PrintStudio.exe)
 build_exe.bat
 ```
+
+启动与依赖安装见上节「启动方法」。
 
 ## 打印原理(说明)
 
