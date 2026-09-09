@@ -34,6 +34,16 @@ _SEL = QColor(0x1B, 0x9E, 0xFF)
 _HOVER = QColor(0xFF, 0xC4, 0x00)   # 悬停在可拉角上时的高亮
 
 
+def _is_image_path(path: str) -> bool:
+    """尝试用 PIL 打开并校验 path, 判断是否为一张可读图片。"""
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
+
+
 def pil_l_to_qimage(im: Image.Image) -> QImage:
     w, h = im.size
     data = im.tobytes()
@@ -569,37 +579,11 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         self.last_dir = os.path.dirname(files[0])
-        usable = WIDTH - 80
-        gap = 24
-        cell = max(80, int((usable - gap * (cols - 1)) / cols))
-        x0 = 40
-        y = self._next_y()
-        row_y = y
-        added, skipped = 0, 0
-        for path in files:
-            try:
-                with Image.open(path) as im:
-                    sw, sh = im.size
-            except Exception:
-                skipped += 1
-                continue
-            if not sw or not sh:
-                sw, sh = WIDTH, cell
-            k = min(cell / sw, cell / sh)          # 缩放至能放进方格
-            iw, ih = max(8, int(sw * k)), max(8, int(sh * k))
-            s = added                              # 成功序(失败不占格)
-            col = s % cols
-            if col == 0 and s:
-                row_y += cell + gap                # 满行换行
-            ix = x0 + col * (cell + gap) + (cell - iw) // 2
-            iy = row_y + (cell - ih) // 2
-            it = ImageItem(path=path, x=ix, y=iy, w=iw, h=ih, keep_aspect=True,
-                           mode="gray", threshold=128)
-            self.doc.items.append(it)
-            added += 1
+        added = self._place_image_grid(files, cols)
         if not added:
             self.statusBar().showMessage("所选图片均无法读取", 2500)
             return
+        skipped = len(files) - added
         self.sel = len(self.doc.items) - 1
         self._sync_all()
         self.refresh_soon()
@@ -622,18 +606,116 @@ class MainWindow(QMainWindow):
         return d
 
     def paste_clipboard(self):
-        """粘贴剪贴板: 有图片贴图, 否则有文字贴文字。"""
+        """粘贴剪贴板: 图片位图→贴图; 复制的图片文件(资源管理器)→按文件导图; 纯文本→贴文字。
+
+        资源管理器里复制图片文件(Ctrl+C)时, 剪贴板通常只有文件路径(CF_HDROP)而没有位图,
+        若直接取 mime.text() 会贴出一段路径文本, 因此要优先识别"文件清单/图片路径"。
+        """
         if QApplication.activeModalWidget() is not None:
             return                          # 编辑弹窗里 Ctrl+V 是弹窗自己的
         mime = QApplication.clipboard().mimeData()
         if mime.hasImage():
             self._paste_clip_image()
+        elif mime.hasUrls():
+            if not self._paste_clip_file_urls(mime):
+                self._paste_clip_plain_text(mime)
         else:
-            txt = (mime.text() or "").strip()
-            if txt:
-                self._paste_clip_text(txt)
-            else:
-                self.statusBar().showMessage("剪贴板为空: 没有图片也没有文字", 2500)
+            self._paste_clip_plain_text(mime)
+
+    def _paste_clip_plain_text(self, mime):
+        """把剪贴板文本按文字贴; 若文本本身指向本地图片文件则改为导图。"""
+        txt = (mime.text() or "").strip()
+        if not txt:
+            self.statusBar().showMessage("剪贴板为空: 没有图片也没有文字", 2500)
+            return
+        p = self._clip_text_image(txt)
+        if p:
+            if self._add_image_full(p):
+                self.statusBar().showMessage("已按图片导入剪贴板路径", 2000)
+            return
+        self._paste_clip_text(txt)
+
+    def _paste_clip_file_urls(self, mime) -> bool:
+        """剪贴板携带文件清单(资源管理器复制): 导入其中可读图片, 返回是否已导入。"""
+        paths = [u.toLocalFile() for u in mime.urls()]
+        if not paths:
+            return False
+        imgs = [p for p in paths if os.path.isfile(p) and self._is_image_file(p)]
+        if not imgs:
+            return False
+        if len(imgs) == 1:
+            if not self._add_image_full(imgs[0]):
+                return False
+        else:
+            if not self._place_image_grid(imgs, min(3, len(imgs))):
+                return False
+            self.sel = len(self.doc.items) - 1
+            self._sync_all()
+            self.refresh_soon()
+        self.statusBar().showMessage(
+            f"已粘贴 {len(imgs)} 张图片文件" if len(imgs) > 1 else "已粘贴剪贴板图片", 2000)
+        return True
+
+    @staticmethod
+    def _clip_text_image(txt: str) -> str:
+        """若文本内容是一条本地图片文件路径, 返回该路径; 否则返回空串。"""
+        t = txt.strip('"').strip()
+        if t.lower().startswith("file:///"):
+            t = t[len("file:///"):]
+        return t if (os.path.isfile(t) and _is_image_path(t)) else ""
+
+    def _add_image_full(self, path: str) -> bool:
+        """把一张图片文件按画布满宽插入新行, 已选中并同步; 成功返回 True。"""
+        try:
+            with Image.open(path) as im:
+                sw, sh = im.size
+        except Exception:
+            return False
+        if not sw or not sh:
+            return False
+        w = WIDTH - 80                       # 等比满宽, 同选图插入
+        h = max(40, int(w * sh / sw)) if (sw and sh) else 1248
+        it = ImageItem(path=path, x=40, y=self._next_y(), w=w, h=h,
+                       keep_aspect=True, mode="gray", threshold=128)
+        self.doc.items.append(it)
+        self.sel = len(self.doc.items) - 1
+        self._sync_all()
+        self.refresh_soon()
+        return True
+
+    def _place_image_grid(self, paths, cols: int) -> int:
+        """把 paths 里的图片按 cols 列网格排版插入(保持比例、格内居中)。返回成功张数。"""
+        usable = WIDTH - 80
+        gap = 24
+        cell = max(80, int((usable - gap * (cols - 1)) / cols))
+        x0 = 40
+        y = self._next_y()
+        row_y = y
+        added = 0
+        for path in paths:
+            try:
+                with Image.open(path) as im:
+                    sw, sh = im.size
+            except Exception:
+                continue
+            if not sw or not sh:
+                sw, sh = WIDTH, cell
+            k = min(cell / sw, cell / sh)          # 缩放至能放进方格
+            iw, ih = max(8, int(sw * k)), max(8, int(sh * k))
+            s = added                              # 成功序(失败不占格)
+            col = s % cols
+            if col == 0 and s:
+                row_y += cell + gap                # 满行换行
+            ix = x0 + col * (cell + gap) + (cell - iw) // 2
+            iy = row_y + (cell - ih) // 2
+            it = ImageItem(path=path, x=ix, y=iy, w=iw, h=ih, keep_aspect=True,
+                           mode="gray", threshold=128)
+            self.doc.items.append(it)
+            added += 1
+        return added
+
+    def _is_image_file(self, path: str) -> bool:
+        return _is_image_path(path)
 
     def _paste_clip_image(self) -> bool:
         img = QApplication.clipboard().image()
@@ -643,19 +725,8 @@ class MainWindow(QMainWindow):
         path = os.path.join(self._clip_dir(), f"clip_{int(time.time() * 1000)}.png")
         if not img.save(path, "PNG"):
             return False
-        w = WIDTH - 80                       # 等比满宽, 同选图插入
-        try:
-            with Image.open(path) as im:
-                sw, sh = im.size
-            h = max(40, int(w * sh / sw)) if (sw and sh) else 1248
-        except Exception:
-            h = 1248
-        it = ImageItem(path=path, x=40, y=self._next_y(), w=w, h=h,
-                       keep_aspect=True, mode="gray", threshold=128)
-        self.doc.items.append(it)
-        self.sel = len(self.doc.items) - 1
-        self._sync_all()
-        self.refresh_soon()
+        if not self._add_image_full(path):
+            return False
         self.statusBar().showMessage("已粘贴剪贴板图片", 2000)
         return True
 
